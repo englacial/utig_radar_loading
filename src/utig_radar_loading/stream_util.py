@@ -91,6 +91,8 @@ def load_gzipped_stream_file(file_path, debug=False, parse=True, parse_kwargs={'
             df = parse_GPStp2(df, **parse_kwargs)
         elif stream_type == 'GPSap1':
             df = parse_GPSap1(df, **parse_kwargs)
+        elif stream_type == 'GPSap3':
+            df = parse_GPSap3(df, **parse_kwargs)
         else:
             print(f"Warning: Unsupported stream type '{stream_type}' for parsing.")
 
@@ -247,23 +249,32 @@ def parse_CT(df):
     
     df = df.copy()
     
-    # Create datetime from CT components
-    # Using clk_y (year) and clk_n (day of year) as primary date info
-    timestamps = []
-    for idx, row in df.iterrows():
-        year = int(row['clk_y'])
-        month = int(row['clk_n'])
-        day = int(row['clk_d'])
-        hour = int(row['clk_h'])
-        minute = int(row['clk_m'])
-        second = int(row['clk_s'])
-        microsecond = int(row['clk_f'] * 1e6) if row['clk_f'] < 1 else int((row['clk_f'] % 1) * 1e6)
-
-        # Create datetime from year, month, and day
-        dt = datetime(year, month, day, hour, minute, second, microsecond)
-        timestamps.append(dt)
+    # Vectorized approach - much faster than iterrows
+    # Convert fractional seconds to microseconds
+    # Handle both cases: clk_f < 1 (already fractional) and clk_f >= 1 (needs modulo)
+    microseconds = np.where(
+        df['clk_f'] < 1,
+        (df['clk_f'] * 1e6).astype('int64'),
+        ((df['clk_f'] % 1) * 1e6).astype('int64')
+    )
     
-    df['TIMESTAMP'] = pd.to_datetime(timestamps)
+    # Create datetime strings in ISO format for pd.to_datetime to parse
+    # This is much faster than creating datetime objects individually
+    # Convert microseconds to Series for string operations
+    microseconds_series = pd.Series(microseconds)
+    
+    datetime_strings = (
+        df['clk_y'].astype('int').astype('str') + '-' +
+        df['clk_n'].astype('int').astype('str').str.zfill(2) + '-' +
+        df['clk_d'].astype('int').astype('str').str.zfill(2) + ' ' +
+        df['clk_h'].astype('int').astype('str').str.zfill(2) + ':' +
+        df['clk_m'].astype('int').astype('str').str.zfill(2) + ':' +
+        df['clk_s'].astype('int').astype('str').str.zfill(2) + '.' +
+        microseconds_series.astype('str').str.zfill(6)
+    )
+    
+    # Parse all datetime strings at once
+    df['TIMESTAMP'] = pd.to_datetime(datetime_strings, format='%Y-%m-%d %H:%M:%S.%f')
     
     return df
 
@@ -415,6 +426,110 @@ def parse_GPStp2(df, use_ct=False):
         
         if 'clk_y' not in df.columns:
             print("Warning: DOS time converted without date information. Timestamps use placeholder date.")
+    
+    return df
+
+
+def parse_GPSap3(df, use_ct=False):
+    """
+    Parse GPSap3 format dataframe and add LAT, LON, TIMESTAMP columns.
+    
+    GPSap3 is from Ashtech GG24 GPS and Glonass Navigation System with:
+    - ECEF coordinates (Earth Centered Earth Fixed) in meters
+    - GPS time in milliseconds of GPS week
+    - Velocities in m/s
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        DataFrame from load_gzipped_stream_file with GPSap3 data
+    use_ct : bool
+        If True, attempt to use CT time headers for TIMESTAMP
+        
+    Returns:
+    --------
+    pandas.DataFrame
+        DataFrame with added LAT, LON, TIMESTAMP columns
+    """
+    df = df.copy()
+    
+    # Convert ECEF coordinates to lat/lon using pyproj
+    if all(col in df.columns for col in ['ecefx', 'ecefy', 'ecefz']):
+        from pyproj import Transformer
+        
+        # Create transformer from ECEF (EPSG:4978) to WGS84 (EPSG:4326)
+        transformer = Transformer.from_crs("EPSG:4978", "EPSG:4326", always_xy=True)
+        
+        # Convert ECEF to lat/lon
+        # Note: pyproj expects X, Y, Z order for ECEF
+        lon, lat, alt = transformer.transform(
+            df['ecefx'].values,
+            df['ecefy'].values, 
+            df['ecefz'].values
+        )
+        
+        df['LAT'] = lat
+        df['LON'] = lon
+        df['ALT'] = alt  # altitude in meters above ellipsoid
+    else:
+        raise ValueError("Columns 'ecefx', 'ecefy', and/or 'ecefz' not found in GPSap3 data")
+    
+    # Handle TIMESTAMP
+    if use_ct:
+        df_with_ct = parse_CT(df)
+        if df_with_ct is not None:
+            df = df_with_ct
+    
+    # If no CT timestamp or CT failed, use GPS time
+    if 'TIMESTAMP' not in df.columns and 'rtime' in df.columns:
+        # GPS time is in milliseconds of GPS week
+        # GPS epoch starts at January 6, 1980 00:00:00 UTC
+        # GPS weeks start on Sunday
+        
+        # Note: We need to know which GPS week we're in to get absolute time
+        # Without that info, we can only get time within the week
+        # For now, we'll need to use CT time or warn the user
+        
+        if 'clk_y' in df.columns and 'clk_n' in df.columns and 'clk_d' in df.columns:
+            # We have date info from CT, use it to determine GPS week
+            timestamps = []
+            for idx, row in df.iterrows():
+                try:
+                    # Get the date from CT columns
+                    year = int(row['clk_y'])
+                    month = int(row['clk_n'])
+                    day = int(row['clk_d'])
+                    
+                    # Calculate GPS week from this date
+                    gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
+                    current_date = datetime(year, month, day)
+                    days_since_epoch = (current_date - gps_epoch).days
+                    gps_week = days_since_epoch // 7
+                    
+                    # Calculate timestamp from GPS week and milliseconds
+                    ms_in_week = int(row['rtime'])
+                    total_ms_since_epoch = gps_week * 7 * 24 * 60 * 60 * 1000 + ms_in_week
+                    
+                    # Convert to datetime
+                    dt = gps_epoch + timedelta(milliseconds=total_ms_since_epoch)
+                    timestamps.append(dt)
+                except (ValueError, TypeError):
+                    timestamps.append(pd.NaT)
+            
+            df['TIMESTAMP'] = pd.to_datetime(timestamps)
+        else:
+            print("Warning: GPSap3 GPS time requires GPS week number or CT date info for absolute timestamps.")
+            print("Using relative time within GPS week starting from Sunday 00:00:00.")
+            
+            # Convert milliseconds to time within the week
+            ms_in_week = df['rtime'].astype('int64')
+            # Assume current GPS week starts at a recent Sunday
+            # This is a placeholder - user should provide actual GPS week or date
+            week_start = datetime.now()
+            week_start = week_start - timedelta(days=week_start.weekday() + 1)  # Previous Sunday
+            week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            df['TIMESTAMP'] = pd.to_datetime(week_start) + pd.to_timedelta(ms_in_week, unit='ms')
     
     return df
 

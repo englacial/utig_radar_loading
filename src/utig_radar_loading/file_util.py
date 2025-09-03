@@ -13,9 +13,11 @@ def load_file_index_df(base_path : str, cache_file : str, read_cache : bool = Tr
     else:
         # Load and process files to create DataFrame
         print(f"Generating file index")
-        all_files = glob.glob(f"{base_path}/**/xds.gz", recursive=True)
-        df_files = pd.DataFrame([Path(f).parts for f in all_files])
-        df_files.to_csv(cache_dir)
+        print(f"Looking for xds.gz")
+        xds_files = glob.glob(f"{base_path}/**/xds.gz", recursive=True)
+        print(f"Looking for bxds")
+        bxds_files = glob.glob(f"{base_path}/**/bxds*", recursive=True)
+        df_files = pd.DataFrame([Path(f).parts for f in (xds_files + bxds_files)])
         
         if cache_file is not None:
             print(f"Saving new cache to {cache_file}")
@@ -23,22 +25,32 @@ def load_file_index_df(base_path : str, cache_file : str, read_cache : bool = Tr
     
     return df_files
 
-def create_artifacts_df(file_index_df : pd.DataFrame) -> pd.DataFrame:
-    df_tmp = file_index_df.copy()
-
-    df_tmp["full_path"] = df_tmp.apply(lambda row: Path(*row[:-1]).as_posix(), axis=1)
-
-    df_tmp.rename(columns={
+def create_artifacts_df(file_index_df : pd.DataFrame, datasets=['UTIG1', 'UTIG2']) -> pd.DataFrame:
+    column_mapping = {
         5: "dataset",
         6: "processing_level",
         7: "processing_type",
         8: "prj",
         9: "set",
         10: "trn",
-        11: "stream"
-        }, inplace=True)
+        11: "stream",
+        12: "file_name",
+        "full_path": "full_path"
+        }
 
-    df_artifacts = df_tmp.drop(columns=[0,1,2,3,4,12,13])
+    df_tmp = file_index_df.copy()
+
+    df_tmp = df_tmp.dropna(axis='columns')
+
+    df_tmp["full_path"] = df_tmp.apply(lambda row: Path(*row).as_posix(), axis=1)
+
+    df_tmp = df_tmp[list(column_mapping.keys())]
+    df_artifacts = df_tmp.rename(columns=column_mapping)
+
+    if datasets is not None:
+        df_artifacts = df_artifacts[df_artifacts['dataset'].isin(datasets)]
+
+    #df_artifacts = df_tmp.drop(columns=[0,1,2,3,4,12,13])
 
     df_artifacts['artifact'] = df_artifacts.apply(lambda row: tuple(row[['processing_level', 'processing_type', 'stream']]), axis='columns')
 
