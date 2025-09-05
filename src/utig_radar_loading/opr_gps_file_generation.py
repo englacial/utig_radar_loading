@@ -18,30 +18,6 @@ from typing import List, Union, Dict, Any
 from . import stream_util
 
 
-def unix_epoch_to_datenum(unix_time):
-    """
-    Convert Unix epoch time to MATLAB datenum.
-    
-    MATLAB datenum is days since January 0, 0000.
-    Unix epoch is seconds since January 1, 1970.
-    
-    Parameters:
-    -----------
-    unix_time : float or array-like
-        Unix epoch time in seconds
-        
-    Returns:
-    --------
-    float or numpy array
-        MATLAB datenum
-    """
-    # MATLAB datenum for Unix epoch (Jan 1, 1970)
-    matlab_unix_epoch = 719529.0
-    
-    # Convert seconds to days and add to epoch
-    return matlab_unix_epoch + np.asarray(unix_time) / 86400.0
-
-
 def load_and_parse_gps_file(gps_path: Union[str, Path], use_ct: bool = True) -> pd.DataFrame:
     """
     Load a single GPS file and parse it to standard format.
@@ -82,11 +58,10 @@ def load_and_parse_gps_file(gps_path: Union[str, Path], use_ct: bool = True) -> 
     df['source_file'] = str(gps_path)
     
     # Convert TIMESTAMP to Unix epoch if it's a datetime
-    if pd.api.types.is_datetime64_any_dtype(df['TIMESTAMP']):
-        df['unix_time'] = df['TIMESTAMP'].astype(np.int64) / 1e9  # Convert nanoseconds to seconds
-    else:
-        df['unix_time'] = df['TIMESTAMP']
-    
+    df['unix_time'] = ((df['TIMESTAMP'] - pd.Timestamp("1970-01-01")) / pd.Timedelta('1s')).values
+    df['comp_time'] = df['unix_time'] # For consistency with header files
+    df['radar_time'] = df['tim']
+
     return df
 
 
@@ -171,6 +146,8 @@ def create_gps_matlab_structure(df: pd.DataFrame) -> Dict[str, Any]:
     # Create the GPS structure matching MATLAB format
     gps_struct = {
         'gps_time': df['unix_time'].values.astype(np.float64),  # Unix epoch seconds
+        'comp_time': df['comp_time'].values.astype(np.float64),  # Same as gps_time -- for compatibility with header files
+        'radar_time': df['radar_time'].values.astype(np.float64), # 10 us ticks
         'lat': df['LAT'].values.astype(np.float64),  # Latitude in degrees
         'lon': df['LON'].values.astype(np.float64),  # Longitude in degrees
         'elev': elev.astype(np.float64),  # Elevation in meters
