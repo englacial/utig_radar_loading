@@ -281,7 +281,7 @@ def make_segment_gps_file(x, output_base_dir, overwrite=False):
 
     # Only generate if the file does not exist
     if (not output_path.exists()) or overwrite:
-        opr_gps_file_generation.generate_gps_file(gps_paths, output_path, format='hdf5')
+        generate_gps_file(gps_paths, output_path, format='hdf5')
     else:
         print(f"File {output_path} already exists. Skipping generation. If you want to regenerate, delete the file or set overwrite=True.")
 

@@ -68,16 +68,18 @@ def load_gzipped_stream_file(file_path, debug=False, parse=True, parse_kwargs={'
                 print(f"Expected {len(column_names)} columns for {stream_type}.")
                 print(f"Expected column names were: {column_names}")
 
+    file.close()
+
     # Check if a ct.gz file exists in the same directory
     ct_path = file_path.parent / "ct.gz"
+    if not ct_path.exists():
+        ct_path = file_path.parent / "ct" # Check for an uncompressed version
+    
     if ct_path.exists():
         ct_df = load_ct_file(ct_path)
-        # ct_file = gzip.open(ct_path, 'rt')
-        # ct_columns = ['prj', 'set', 'trn', 'seq', 'clk_y', 'clk_n', 'clk_d', 'clk_h', 'clk_m', 'clk_s', 'clk_f', 'tim']
-        # ct_df = pd.read_csv(ct_file, sep=r'\s+', names=ct_columns, index_col=False)
 
         if debug:
-            print(f"Found ct.gz file: {ct_path}")
+            print(f"Found ct().gz) file: {ct_path}")
             print(f"len(ct_df): {len(ct_df)}, len(df): {len(df)}")
         
         if len(ct_df) == len(df):
@@ -105,11 +107,20 @@ def load_ct_file(file_path : str, read_csv_kwargs = {}):
     
     path = path / 'ct.gz'
     if not path.exists():
-        raise FileNotFoundError(f"ct.gz file not found at {file_path}")
+        path = path.parent / 'ct'  # Check for uncompressed version
+    if not path.exists():
+        raise FileNotFoundError(f"Neither a ct.gz nor a ct file could be found at {file_path}")
 
-    ct_file = gzip.open(path, 'rt')
+    if path.suffix == '.gz':
+        ct_file = gzip.open(path, 'rt')
+    else:
+        ct_file = open(path, 'r')
+
     ct_columns = ['prj', 'set', 'trn', 'seq', 'clk_y', 'clk_n', 'clk_d', 'clk_h', 'clk_m', 'clk_s', 'clk_f', 'tim']
-    return pd.read_csv(ct_file, sep=r'\s+', names=ct_columns, index_col=False, **read_csv_kwargs)
+    df = pd.read_csv(ct_file, sep=r'\s+', names=ct_columns, index_col=False, **read_csv_kwargs)
+
+    ct_file.close()
+    return df
 
 def get_stream_headers(stream_type):
     if stream_type == 'GPSap3':
