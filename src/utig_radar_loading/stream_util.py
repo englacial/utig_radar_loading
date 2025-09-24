@@ -261,7 +261,7 @@ def parse_CT(df):
     # Create datetime strings in ISO format for pd.to_datetime to parse
     # This is much faster than creating datetime objects individually
     # Convert microseconds to Series for string operations
-    microseconds_series = pd.Series(microseconds)
+    microseconds_series = pd.Series(microseconds, index=df.index)
     
     datetime_strings = (
         df['clk_y'].astype('int').astype('str') + '-' +

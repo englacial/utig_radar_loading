@@ -154,7 +154,7 @@ def create_gps_matlab_structure(df: pd.DataFrame) -> Dict[str, Any]:
         'roll': roll.astype(np.float64),  # Roll in radians (or zeros)
         'pitch': pitch.astype(np.float64),  # Pitch in radians (or zeros)
         'heading': heading.astype(np.float64),  # Heading in radians (or zeros)
-        'gps_source': 'UTIG_GPSNC1'  # GPS source identifier
+        'gps_source': 'UTIG_GPSnc1-field'  # GPS source identifier # TODO: Should be dynamically selected from source data
     }
     
     # Ensure all arrays are 1D and same length
@@ -270,3 +270,19 @@ def generate_gps_file(gps_paths: List[Union[str, Path]],
     print(f"Lat range: {gps_struct['lat'].min():.6f} to {gps_struct['lat'].max():.6f}")
     print(f"Lon range: {gps_struct['lon'].min():.6f} to {gps_struct['lon'].max():.6f}")
     print(f"Elev range: {gps_struct['elev'].min():.2f} to {gps_struct['elev'].max():.2f} meters")
+
+def make_segment_gps_file(x, output_base_dir, overwrite=False):
+    # Designed to be called by .apply on df_season grouped by segment
+    # Example usage: gps_paths = df_season.groupby(['segment_date_str', 'segment_number'])[['segment_date_str', 'segment_number', 'gps_path']].apply(opr_gps_file_generation.make_segment_gps_file, include_groups=False, overwrite=False)
+    x = x.reset_index()
+    print(f"{x['segment_date_str'].iloc[0]}_{x['segment_number'].iloc[0]}")
+    gps_paths = list(x['gps_path'].unique())
+    output_path = output_base_dir / Path(f"gps_{x['segment_date_str'].iloc[0]}_{x['segment_number'].iloc[0]}.mat")
+
+    # Only generate if the file does not exist
+    if (not output_path.exists()) or overwrite:
+        opr_gps_file_generation.generate_gps_file(gps_paths, output_path, format='hdf5')
+    else:
+        print(f"File {output_path} already exists. Skipping generation. If you want to regenerate, delete the file or set overwrite=True.")
+
+    return output_path.resolve()

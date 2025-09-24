@@ -3,6 +3,33 @@ from shapely import LineString
 import numpy as np
 import pandas as pd
 import holoviews as hv
+from utig_radar_loading import stream_util
+
+def load_gps_data(transects_df):
+    segment_dfs = []
+
+    for _, row in transects_df.iterrows():
+
+        f = row['gps_path']
+        
+        df = stream_util.load_gzipped_stream_file(f, debug=False, parse=True, parse_kwargs={'use_ct': True})
+
+        line_length_km = stream_util.calculate_track_distance_km(df)
+
+        _, _, line_length_m_shapely = project_split_and_simplify(df['LON'].values, df['LAT'].values, calc_length=True, simplify_tolerance=100)
+
+        necessary_keys = ['prj', 'set', 'trn', 'clk_y', 'LAT', 'LON', 'TIMESTAMP']
+        for k in necessary_keys:
+            if k not in df:
+                df[k] = np.nan
+
+        df_sub = df[['prj', 'set', 'trn', 'clk_y', 'LAT', 'LON', 'TIMESTAMP']]
+
+        if 'segment_path' in row:
+            df_sub['segment_path'] = row['segment_path']
+
+        segment_dfs.append(df_sub)
+    return segment_dfs
 
 def project_split_and_simplify(lon, lat, projection='EPSG:3031', simplify_tolerance=1000,
                                 split_dist=2000, calc_length=False):

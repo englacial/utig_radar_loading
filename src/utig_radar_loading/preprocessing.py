@@ -56,54 +56,58 @@ def extract_headers(bxds_files: List[Union[Path, str]]) -> Dict:
             continue
         
         # Load CT timing for this file using stream_util
-        ct_data = None
-        try:
-            ct_data = stream_util.load_ct_file(bxds_file)
-            print(f"Loaded {len(ct_data)} CT records for {bxds_file.name}")
-        except FileNotFoundError:
-            warnings.warn(f"No CT file found for {bxds_file}")
-        except Exception as e:
-            warnings.warn(f"Error loading CT file for {bxds_file}: {e}")
+        ct_data = stream_util.load_ct_file(bxds_file)
+        ct_data = stream_util.parse_CT(ct_data)
+
+        headers
+
+        # try:
+        #     ct_data = stream_util.load_ct_file(bxds_file)
+        #     print(f"Loaded {len(ct_data)} CT records for {bxds_file.name}")
+        # except FileNotFoundError:
+        #     warnings.warn(f"No CT file found for {bxds_file}")
+        # except Exception as e:
+        #     warnings.warn(f"Error loading CT file for {bxds_file}: {e}")
             
-        # Read header from bxds file (simplified - just get record count and timing)
-        with open(bxds_file, 'rb') as f:
-            # Read first XDS header to get structure
-            nsamp = struct.unpack('>H', f.read(2))[0]  # uint16, big-endian
-            nchan = struct.unpack('B', f.read(1))[0]   # uint8
+        # # Read header from bxds file (simplified - just get record count and timing)
+        # with open(bxds_file, 'rb') as f:
+        #     # Read first XDS header to get structure
+        #     nsamp = struct.unpack('>H', f.read(2))[0]  # uint16, big-endian
+        #     nchan = struct.unpack('B', f.read(1))[0]   # uint8
             
-            # Calculate record size
-            header_size = 36 + 17*2  # XDS header + odd stuff
-            data_size = 2 * nsamp * nchan
-            record_size = header_size + data_size
+        #     # Calculate record size
+        #     header_size = 36 + 17*2  # XDS header + odd stuff
+        #     data_size = 2 * nsamp * nchan
+        #     record_size = header_size + data_size
             
-            # Get file size
-            f.seek(0, 2)
-            file_size = f.tell()
-            num_records = file_size // record_size
+        #     # Get file size
+        #     f.seek(0, 2)
+        #     file_size = f.tell()
+        #     num_records = file_size // record_size
             
-            print(f"nsamp: {nsamp}, nchan: {nchan}, num_records: {num_records}")
+        #     print(f"nsamp: {nsamp}, nchan: {nchan}, num_records: {num_records}")
             
-            # Extract timing for each record
-            for rec_idx in range(num_records):
-                offset = rec_idx * record_size
-                f.seek(offset)
+        #     # Extract timing for each record
+        #     for rec_idx in range(num_records):
+        #         offset = rec_idx * record_size
+        #         f.seek(offset)
                 
-                # Read XDS header fields
-                f.seek(offset + 28)  # Skip to rseq field
-                rseq = struct.unpack('>I', f.read(4))[0]  # uint32, big-endian
+        #         # Read XDS header fields
+        #         f.seek(offset + 28)  # Skip to rseq field
+        #         rseq = struct.unpack('>I', f.read(4))[0]  # uint32, big-endian
                 
-                headers['offsets'].append(offset)
-                headers['file_idxs'].append(file_idx)
-                headers['radar_time'].append(rseq)  # Using rseq as proxy for time
+        #         headers['offsets'].append(offset)
+        #         headers['file_idxs'].append(file_idx)
+        #         headers['radar_time'].append(rseq)  # Using rseq as proxy for time
                 
-                # Add CT timing if available
-                if ct_data is not None and rec_idx < len(ct_data):
-                    # Convert CT time to Unix epoch using datenum calculation
-                    ct_row = ct_data.iloc[rec_idx]
-                    # Use the 'tim' field as the primary time reference
-                    headers['comp_time'].append(ct_row['tim'])
-                else:
-                    headers['comp_time'].append(np.nan)
+        #         # Add CT timing if available
+        #         if ct_data is not None and rec_idx < len(ct_data):
+        #             # Convert CT time to Unix epoch using datenum calculation
+        #             ct_row = ct_data.iloc[rec_idx]
+        #             # Use the 'tim' field as the primary time reference
+        #             headers['comp_time'].append(ct_row['tim'])
+        #         else:
+        #             headers['comp_time'].append(np.nan)
     
     # Convert to numpy arrays
     for key in headers:
