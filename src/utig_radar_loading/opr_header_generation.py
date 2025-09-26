@@ -47,8 +47,7 @@ def get_header_information(f):
 
     offsets_array = df[['ch0_offset', 'ch1_offset', 'ch2_offset', 'ch3_offset']].to_numpy()
     # Final shape is Nb x Nx x Nc (boards x records x channels)
-    offsets_array = np.expand_dims(offsets_array, axis=0) # Add a board axis
-
+    offsets_array = np.expand_dims(offsets_array, axis=0).astype(np.int64) # Add a board axis
 
     headers = {
         # comp_time is ct_data['TIMESTAMP'] converted to a floating point unix timestamp
