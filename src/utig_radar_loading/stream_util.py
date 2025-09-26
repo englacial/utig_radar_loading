@@ -15,8 +15,7 @@ import sys
 
 #streams_definitions = "/resfs/GROUPS/CRESIS/dataproducts/metadata/2022_Antarctica_BaslerMKB/UTIG_documentation/streams"
 
-
-def load_gzipped_stream_file(file_path, debug=False, parse=True, parse_kwargs={'use_ct': True},):
+def load_xds_stream_file(file_path, debug=False, parse=True, parse_kwargs={'use_ct': True},):
     """
     Load a gzipped stream file as a pandas DataFrame with appropriate column names.
     
@@ -76,7 +75,7 @@ def load_gzipped_stream_file(file_path, debug=False, parse=True, parse_kwargs={'
         ct_path = file_path.parent / "ct" # Check for an uncompressed version
     
     if ct_path.exists():
-        ct_df = load_ct_file(ct_path)
+        ct_df = load_ct_file(str(ct_path))
 
         if debug:
             print(f"Found ct().gz) file: {ct_path}")
@@ -302,7 +301,7 @@ def parse_GPSnc1(df, use_ct=False):
     Parameters:
     -----------
     df : pandas.DataFrame
-        DataFrame from load_gzipped_stream_file with GPSnc1 data
+        DataFrame from load_xds_stream_file with GPSnc1 data
     use_ct : bool
         If True, attempt to use CT time headers for TIMESTAMP
         
@@ -323,6 +322,14 @@ def parse_GPSnc1(df, use_ct=False):
         df['LON'] = df['lon_ang']
     else:
         raise ValueError("Column 'lon_ang' not found in GPSnc1 data")
+
+    ni_epoch = pd.to_datetime('1904-01-01 00:00:00')  # NI epoch start date
+    # See https://www.ni.com/en/support/documentation/supplemental/08/labview-timestamp-overview.html
+
+    seconds_since_epoch = pd.to_timedelta(df['gps_time'].astype('int64') + df['gps_subsecs'].astype('uint64') / (2**64), unit='s')
+    gps_time = pd.to_datetime(ni_epoch) + seconds_since_epoch
+    df['GPS_TIME'] = (gps_time - pd.Timestamp("1980-01-06 00:00:00")) / pd.Timedelta('1s')
+
     
     # Try CT time first if requested
     if use_ct:
@@ -336,24 +343,8 @@ def parse_GPSnc1(df, use_ct=False):
     
     # Create TIMESTAMP from GPS time if not using CT
     if not use_ct:
-        if 'gps_time' in df.columns and 'gps_subsecs' in df.columns:
-            # GPS epoch starts at January 6, 1980 00:00:00 UTC
-            gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
-            
-            # Convert GPS time (seconds since GPS epoch) to datetime
-            gps_seconds = df['gps_time'].astype('int64')
-            
-            # Convert subseconds from fraction * 2^64 to actual fraction
-            gps_fractions = df['gps_subsecs'].astype('uint64') / (2**64)
-            
-            # Combine seconds and fractions
-            total_seconds = gps_seconds + gps_fractions
-            
-            # Create datetime by adding total seconds to GPS epoch
-            df['TIMESTAMP'] = pd.to_datetime(gps_epoch) + pd.to_timedelta(total_seconds, unit='s')
-        else:
-            raise ValueError("Columns 'gps_time' and/or 'gps_subsecs' not found in GPSnc1 data")
-    
+        df['TIMESTAMP'] = gps_time
+        
     return df
 
 
@@ -368,7 +359,7 @@ def parse_GPStp2(df, use_ct=False):
     Parameters:
     -----------
     df : pandas.DataFrame
-        DataFrame from load_gzipped_stream_file with GPStp2 data
+        DataFrame from load_xds_stream_file with GPStp2 data
     use_ct : bool
         If True, attempt to use CT time headers for TIMESTAMP
         
@@ -453,7 +444,7 @@ def parse_GPSap3(df, use_ct=False):
     Parameters:
     -----------
     df : pandas.DataFrame
-        DataFrame from load_gzipped_stream_file with GPSap3 data
+        DataFrame from load_xds_stream_file with GPSap3 data
     use_ct : bool
         If True, attempt to use CT time headers for TIMESTAMP
         
@@ -545,7 +536,176 @@ def parse_GPSap3(df, use_ct=False):
     return df
 
 
-def parse_GPSap1(df, use_ct=False):
+def parse_binary_AVNnp1(file_path):
+    """
+    Parse binary AVNnp1 IMU data from Novatel INSPVAS packets.
+
+    Searches for Novatel OEM sync pattern (0xAA4413) and parses the complete
+    packet structure including header and INSPVAS payload.
+
+    This function screens for the Novatel Message ID and will ONLY parse Message ID 508.
+    All other messages are ignored.
+
+    Be aware that the documentation in /resfs/GROUPS/CRESIS/dataproducts/metadata/2022_Antarctica_BaslerMKB/UTIG_documentation/streams/AVNnp1
+    is not correct.
+
+    Refer to the official Novatel documentation instead:
+    https://docs.novatel.com/OEM7/Content/SPAN_Logs/INSPVAS.htm
+    https://docs.novatel.com/OEM7/Content/Messages/Description_of_Short_Headers.htm
+
+    Novatel OEM Short Header (12 bytes total):
+    - Sync: 0xAA4413 (3 bytes)
+    - Message Length: varies (1 byte) - payload length only
+    - Message ID: varies (2 bytes) - identifies the message type
+    - Week Number: varies (2 bytes) - GPS week number
+    - Milliseconds of Week: varies (4 bytes) - time within GPS week
+
+    Parameters:
+    -----------
+    file_path : str or Path
+        Path to binary AVNnp1 bxds file
+
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame with parsed IMU data and GPS timestamps
+    """
+    import struct
+
+    file_path = Path(file_path)
+
+    # Read binary data
+    with open(file_path, 'rb') as f:
+        binary_data = f.read()
+
+    # Search for Novatel OEM sync pattern
+    sync_pattern = bytes([0xAA, 0x44, 0x13])
+    pos = 0
+    records = []
+
+    while True:
+        # Find next sync pattern
+        pos = binary_data.find(sync_pattern, pos)
+        if pos == -1:
+            break
+
+        try:
+            # Parse 12-byte header starting from sync pattern
+            header_bytes = binary_data[pos:pos+12]
+            if len(header_bytes) < 12:
+                break
+
+            # Parse Novatel OEM short header fields correctly:
+            # Bytes 0-2: Sync (0xAA4413) - already found
+            # Byte 3: Message Length (1 byte)
+            # Bytes 4-5: Message ID (2 bytes, little-endian)
+            # Bytes 6-7: Week Number (2 bytes, little-endian)
+            # Bytes 8-11: Milliseconds of Week (4 bytes, little-endian)
+            message_length = header_bytes[3]
+            message_id = struct.unpack('<H', header_bytes[4:6])[0]
+            hdr_week_number = struct.unpack('<H', header_bytes[6:8])[0]
+            milliseconds_of_week = struct.unpack('<I', header_bytes[8:12])[0]
+
+            # Validate header - reasonable message length and GPS week
+            if message_length > 100000 or not (1000 <= hdr_week_number <= 3000):
+                pos += 1
+                continue
+
+            # For now, only parse message type 508 (INSPVAS)
+            # https://docs.novatel.com/OEM7/Content/SPAN_Logs/INSPVAS.htm
+            if message_id != 508:
+                pos += 1
+                continue
+
+            # Parse payload
+            payload_format = '<IdddddddddddII'
+            payload_size = struct.calcsize(payload_format)
+            payload_start = pos + 12
+            payload_bytes = binary_data[payload_start:payload_start + payload_size]
+            if len(payload_bytes) < payload_size:
+                break
+
+            # Unpack INSPVAS data (Message ID: 508)
+            inspvas_data = struct.unpack(payload_format, payload_bytes)
+
+            gps_week = inspvas_data[0]
+            seconds_into_week = inspvas_data[1]
+            latitude_deg = inspvas_data[2]
+            longitude_deg = inspvas_data[3]
+            altitude_m = inspvas_data[4]
+            north_velocity_ms = inspvas_data[5]
+            east_velocity_ms = inspvas_data[6]
+            up_velocity_ms = inspvas_data[7]
+            roll_deg = inspvas_data[8]
+            pitch_deg = inspvas_data[9]
+            azimuth_deg = inspvas_data[10]
+            imu_status = inspvas_data[11]
+            # TODO: CRC ignored for now
+
+            if hdr_week_number != gps_week:
+                print(f"Warning: Header week number {hdr_week_number} does not match payload GPS week {gps_week}")
+                pos += 1
+                continue
+
+            # Calculate GPS timestamp
+            gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
+            gps_time = (pd.Timedelta(weeks=gps_week) + pd.Timedelta(seconds=seconds_into_week))/pd.Timedelta('1s')
+
+            # Store record
+            records.append({
+                # Header fields
+                'position': pos,
+                'message_id': message_id,
+                'message_length': message_length,
+
+                # Time fields
+                'gps_week': gps_week,
+                'seconds_into_week': seconds_into_week,
+                'GPS_TIME': gps_time,
+
+                # Status
+                'imu_status': imu_status,
+
+                # Position
+                'latitude_deg': latitude_deg,
+                'longitude_deg': longitude_deg,
+                'altitude_m': altitude_m,
+
+                # Velocities
+                'north_velocity_ms': north_velocity_ms,
+                'east_velocity_ms': east_velocity_ms,
+                'up_velocity_ms': up_velocity_ms,
+
+                # Attitude
+                'roll_deg': roll_deg,
+                'pitch_deg': pitch_deg,
+                'azimuth_deg': azimuth_deg,
+
+                # Attitude (rad)
+                'ROLL': np.deg2rad(roll_deg) if not np.isnan(roll_deg) else np.nan,
+                'PITCH': np.deg2rad(pitch_deg) if not np.isnan(pitch_deg) else np.nan,
+                'HEADING': np.deg2rad(azimuth_deg) if not np.isnan(azimuth_deg) else np.nan,
+            })
+
+        except (struct.error, ValueError):
+            pass
+
+        # Move to next potential sync pattern
+        pos += 1
+
+    df = pd.DataFrame(records)
+
+    if len(df) == 0:
+        print("Warning: No valid packets found")
+        return df
+
+    # Sort by GPS time
+    df = df.sort_values('GPS_TIME').reset_index(drop=True)
+
+    return df
+
+
+def parse_GPSp1(df, use_ct=False):
     """
     Parse GPSap1 format dataframe and add LAT, LON, TIMESTAMP columns.
     
@@ -557,7 +717,7 @@ def parse_GPSap1(df, use_ct=False):
     Parameters:
     -----------
     df : pandas.DataFrame
-        DataFrame from load_gzipped_stream_file with GPSap1 data
+        DataFrame from load_xds_stream_file with GPSap1 data
     use_ct : bool
         If True, attempt to use CT time headers for TIMESTAMP
         

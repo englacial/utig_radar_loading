@@ -12,7 +12,7 @@ def load_gps_data(transects_df):
 
         f = row['gps_path']
         
-        df = stream_util.load_gzipped_stream_file(f, debug=False, parse=True, parse_kwargs={'use_ct': True})
+        df = stream_util.load_xds_stream_file(f, debug=False, parse=True, parse_kwargs={'use_ct': True})
 
         line_length_km = stream_util.calculate_track_distance_km(df)
 
