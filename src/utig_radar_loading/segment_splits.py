@@ -5,7 +5,7 @@ from tqdm import tqdm
 from utig_radar_loading import stream_util
 from utig_radar_loading.geo_util import project_split_and_simplify
 
-def assign_segments(df_season, timestamp_field='tim', timestamp_split_threshold=1000, parse_ct=False):
+def assign_segments(df_season, timestamp_field='tim', timestamp_split_threshold=1000, parse_ct=False, progress=False):
     """
     Assigns segment paths to each row in df_season based on gaps in the specified timestamp field.
     Parameters:
@@ -16,10 +16,10 @@ def assign_segments(df_season, timestamp_field='tim', timestamp_split_threshold=
     Returns:
     - df_season with additional columns: 'segment_path', 'segment_date_str', 'segment_number'.
     """
+
+    df_season = df_season.sort_values(by='start_timestamp')
     
-    last_segment_ct = stream_util.load_ct_file(df_season.iloc[0]['radar_path'])
-    if parse_ct:
-        last_segment_ct = stream_util.parse_CT(last_segment_ct)
+    last_segment_ct = stream_util.load_ct_file(df_season.iloc[0]['radar_path'], parse=parse_ct)
 
     df_season['segment_path'] = ""
     df_season['segment_date_str'] = ""
@@ -31,14 +31,15 @@ def assign_segments(df_season, timestamp_field='tim', timestamp_split_threshold=
     df_season.iloc[0, df_season.columns.get_loc('segment_path')] = f"{current_segment_datestring}_{current_segment_idx:02d}"
     df_season.iloc[0, df_season.columns.get_loc('segment_number')] = current_segment_idx
 
-
     print(f"Initial segment path is: {df_season.iloc[0]['segment_path']}")
 
-    for row_iloc in tqdm(range(1, len(df_season))):
+    iterator = range(1, len(df_season))
+    if progress:
+        iterator = tqdm(iterator)
+
+    for row_iloc in iterator:
         try:
-            curr_segment_ct = stream_util.load_ct_file(df_season.iloc[row_iloc]['radar_path'])
-            if parse_ct:
-                curr_segment_ct = stream_util.parse_CT(curr_segment_ct)
+            curr_segment_ct = stream_util.load_ct_file(df_season.iloc[row_iloc]['radar_path'], parse=parse_ct)
 
             delta_from_last = curr_segment_ct[timestamp_field].iloc[0] - last_segment_ct[timestamp_field].iloc[-1]
 

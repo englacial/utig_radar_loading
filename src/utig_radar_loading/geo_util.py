@@ -3,16 +3,25 @@ from shapely import LineString
 import numpy as np
 import pandas as pd
 import holoviews as hv
-from utig_radar_loading import stream_util
+from utig_radar_loading import stream_util, opr_gps_file_generation
 
-def load_gps_data(transects_df):
+def load_gps_data(transects_df, source_type='field'):
     segment_dfs = []
 
-    for _, row in transects_df.iterrows():
+    for idx, row in transects_df.iterrows():
 
-        f = row['gps_path']
-        
-        df = stream_util.load_xds_stream_file(f, debug=False, parse=True, parse_kwargs={'use_ct': True})
+        if source_type == 'field':
+            f = row['gps_path']
+            
+            df = stream_util.load_xds_stream_file(f, parse=True)
+        elif source_type == 'postprocessed':
+            f = row['postprocessed_gps_path']
+            df = opr_gps_file_generation.load_and_parse_postprocessed_gps_file(f)
+            df['prj'] = idx[0]
+            df['set'] = idx[1]
+            df['trn'] = idx[2]
+        else:
+            raise ValueError(f"Unknown source_type {source_type}")
 
         line_length_km = stream_util.calculate_track_distance_km(df)
 
@@ -128,7 +137,7 @@ def create_path(segment_dfs, path_opts_kwargs={}):
                 display_fields,
                 ).opts(
                     tools=['hover'],
-                    line_width=2,
+                    line_width=0.5,
                     show_legend=True,
                     **path_opts_kwargs
                 )

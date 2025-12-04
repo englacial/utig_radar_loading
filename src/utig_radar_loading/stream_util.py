@@ -12,10 +12,60 @@ import geoviews.feature as gf
 import numpy as np
 from datetime import datetime, timedelta
 import sys
+from utig_radar_loading.time_util import UNIX_EPOCH, GPS_EPOCH, NI_EPOCH
 
-#streams_definitions = "/resfs/GROUPS/CRESIS/dataproducts/metadata/2022_Antarctica_BaslerMKB/UTIG_documentation/streams"
+#
+# This file contains methods for parsing data from UTIG data files of various kinds.
+# There are four main categories of data files, each with different starting points for
+# loading and parsing:
+# 1. CT ("context") files (ct.gz or ct)
+#    |-> load_ct_file() accepts a file path to a ct or ct.gz file and returns a dataframe.
+#        Context files are located in the same directories as stream files and are supposed
+#        to have the same number of rows as the stream file in that directory.
+# 2. XDS stream files (e.g. GPSnc1, GPStp2, GPSap1, GPSap3)
+#    |-> load_xds_stream_file() accepts a file path to an xds or xds.gz file. The stream
+#        type is inferred from the parent folder name. The
+#        load_xds_stream_file() function will automatically look for a ct.gz or ct file
+#        in the same directory as the stream file and merge the two dataframes if found.
+# 3. Binary files (e.g. AVNnp1, RADnh1)
+#    |-> parse_binary_AVNnp1() accepts a file path to a binary AVNnp1 file and returns
+#        a dataframe.
+#        For loading any RAD*** binary files, use the UTIG unfoc library:
+#        https://github.com/UTIG/unfoc/
+# 4. Post-processed positioning files
+#    |-> These are space-separated value .txt files made from post-processed GPS and
+#        IMU data. They are loaded with load_postprocessed_position_file().
+#
+# All of these functions will return a dataframe with appropriate column names.
+# The convention here is that loaded file columns are lowercase, while any parsed
+# or derived columns are uppercase. Parsed columns that this library tries to add
+# correspond to the definitions for OPR GPS files or OPR records files:
+# https://gitlab.com/openpolarradar/opr/-/wikis/GPS-File-Guide
+# https://gitlab.com/openpolarradar/opr/-/wikis/Record-File-Guide
+#
+# Parsed columns are:
+# - GPS_TIME: gps time of each record in ANSI-C time (seconds since Jan 1, 1970).
+# - GPS_TIME_DT: The above, converted to a pandas datetime object for convenience. Recommended for reference only.
+# - HEADING: heading of each record in radians. Positive is clockwise. Zero at true north.
+# - LAT: latitude of each record in degrees. Positive toward north. Zero at equator.
+# - LON: longitude of each record in degrees. Positive toward east. Zero at prime meridian.
+# - PITCH: pitch of each record in radians. Positive nose up. Zero is level flight.
+# - ROLL: roll of each record in radians. Positive means right wing tip down. Zero is level flight.
+# - COMP_TIME: Parsed time from context (CT) files in ANSI-C time (seconds since Jan 1, 1970).
+# - COMP_TIME_DT: The above, converted to a pandas datetime object for convenience. Recommended for reference only.
+# - RADAR_TIME: `tim` counter field from context (CT) files. Measures time in microseconds. No absolute reference.
+# 
+# Notes about `GPS_TIME`:
+# 1. `GPS_TIME` is NOT UTC time and leap seconds need to be subtracted to find UTC time.
+# 2. `GPS_TIME` is seconds since Jan 1, 1970, NOT seconds since Jan 6, 1980 (the GPS epoch).
+#    This is to follow the conventions set by OPR.
+#
+# Some documentation about UTIG stream formats can be found on the OPR servers:
+# > /resfs/GROUPS/CRESIS/dataproducts/metadata/2022_Antarctica_BaslerMKB/UTIG_documentation/streams
+# Note, however, that these documents are not 100% accurate.
+#
 
-def load_xds_stream_file(file_path, debug=False, parse=True, parse_kwargs={'use_ct': True},):
+def load_xds_stream_file(file_path, parse=True, debug=False, parse_kwargs={}):
     """
     Load a gzipped stream file as a pandas DataFrame with appropriate column names.
     
@@ -94,12 +144,14 @@ def load_xds_stream_file(file_path, debug=False, parse=True, parse_kwargs={'use_
             df = parse_GPSap1(df, **parse_kwargs)
         elif stream_type == 'GPSap3':
             df = parse_GPSap3(df, **parse_kwargs)
+        elif stream_type == 'GPSkc1':
+            df = parse_GPSkc1(df, **parse_kwargs)
         else:
             print(f"Warning: Unsupported stream type '{stream_type}' for parsing.")
 
     return df
 
-def load_ct_file(file_path : str, read_csv_kwargs = {}):
+def load_ct_file(file_path : str, read_csv_kwargs = {}, parse=True):
     path = Path(file_path)
     if path.is_file():
         path = path.parent
@@ -119,6 +171,73 @@ def load_ct_file(file_path : str, read_csv_kwargs = {}):
     df = pd.read_csv(ct_file, sep=r'\s+', names=ct_columns, index_col=False, **read_csv_kwargs)
 
     ct_file.close()
+
+    if parse:
+        df = parse_CT(df) # Parse date/time and add COMP_TIME column
+        df['RADAR_TIME'] = df['tim'] # Add RADAR_TIME column for consistency with stream files
+
+    return df
+
+def parse_CT(df):
+    """
+    Parse CT time headers and create COMP_TIME parsed column.
+    
+    CT headers: clk_y, clk_n, clk_d, clk_h, clk_m, clk_s, clk_f
+    where:
+    - clk_y: year
+    - clk_n: month
+    - clk_d: day
+    - clk_h: hour
+    - clk_m: minute
+    - clk_s: second
+    - clk_f: fractional seconds
+    
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        DataFrame potentially containing CT time columns
+        
+    Returns:
+    --------
+    pandas.DataFrame or None
+        DataFrame with added COMP_TIME column if CT columns exist, None otherwise
+    """
+    ct_columns = ['clk_y', 'clk_n', 'clk_d', 'clk_h', 'clk_m', 'clk_s', 'clk_f']
+    
+    # Check if all CT columns exist
+    if not all(col in df.columns for col in ct_columns):
+        return None
+    
+    df = df.copy()
+    
+    # Vectorized approach - much faster than iterrows
+    # Convert fractional seconds to microseconds
+    # Handle both cases: clk_f < 1 (already fractional) and clk_f >= 1 (needs modulo)
+    microseconds = np.where(
+        df['clk_f'] < 1,
+        (df['clk_f'] * 1e6).astype('int64'),
+        ((df['clk_f'] % 1) * 1e6).astype('int64')
+    )
+    
+    # Create datetime strings in ISO format for pd.to_datetime to parse
+    # This is much faster than creating datetime objects individually
+    # Convert microseconds to Series for string operations
+    microseconds_series = pd.Series(microseconds, index=df.index)
+    
+    datetime_strings = (
+        df['clk_y'].astype('int').astype('str') + '-' +
+        df['clk_n'].astype('int').astype('str').str.zfill(2) + '-' +
+        df['clk_d'].astype('int').astype('str').str.zfill(2) + ' ' +
+        df['clk_h'].astype('int').astype('str').str.zfill(2) + ':' +
+        df['clk_m'].astype('int').astype('str').str.zfill(2) + ':' +
+        df['clk_s'].astype('int').astype('str').str.zfill(2) + '.' +
+        microseconds_series.astype('str').str.zfill(6)
+    )
+    
+    # Parse all datetime strings at once
+    df['COMP_TIME_DT'] = pd.to_datetime(datetime_strings, format='%Y-%m-%d %H:%M:%S.%f')
+    df['COMP_TIME'] = df['COMP_TIME_DT'].astype('int64') / 1e9
+    
     return df
 
 def get_stream_headers(stream_type):
@@ -177,6 +296,8 @@ def get_stream_headers(stream_type):
             'northing',        # northing in meters (dddddddd.ffff)
             'dos_time',         # DOS time (hh:mm:ss.s)
         ]
+    elif stream_type == 'GPSkc1':
+        return ['gps_clk', 'gps_tqc', 'ignored']
     else:
         return None
 
@@ -227,69 +348,8 @@ def calculate_track_distance_km(df, lat_col='LAT', lon_col='LON'):
     
     return total_distance_km
 
-def parse_CT(df):
-    """
-    Parse CT time headers and create TIMESTAMP column.
-    
-    CT headers: clk_y, clk_n, clk_d, clk_h, clk_m, clk_s, clk_f
-    where:
-    - clk_y: year
-    - clk_n: month
-    - clk_d: day
-    - clk_h: hour
-    - clk_m: minute
-    - clk_s: second
-    - clk_f: fractional seconds
-    
-    Parameters:
-    -----------
-    df : pandas.DataFrame
-        DataFrame potentially containing CT time columns
-        
-    Returns:
-    --------
-    pandas.DataFrame or None
-        DataFrame with added TIMESTAMP column if CT columns exist, None otherwise
-    """
-    ct_columns = ['clk_y', 'clk_n', 'clk_d', 'clk_h', 'clk_m', 'clk_s', 'clk_f']
-    
-    # Check if all CT columns exist
-    if not all(col in df.columns for col in ct_columns):
-        return None
-    
-    df = df.copy()
-    
-    # Vectorized approach - much faster than iterrows
-    # Convert fractional seconds to microseconds
-    # Handle both cases: clk_f < 1 (already fractional) and clk_f >= 1 (needs modulo)
-    microseconds = np.where(
-        df['clk_f'] < 1,
-        (df['clk_f'] * 1e6).astype('int64'),
-        ((df['clk_f'] % 1) * 1e6).astype('int64')
-    )
-    
-    # Create datetime strings in ISO format for pd.to_datetime to parse
-    # This is much faster than creating datetime objects individually
-    # Convert microseconds to Series for string operations
-    microseconds_series = pd.Series(microseconds, index=df.index)
-    
-    datetime_strings = (
-        df['clk_y'].astype('int').astype('str') + '-' +
-        df['clk_n'].astype('int').astype('str').str.zfill(2) + '-' +
-        df['clk_d'].astype('int').astype('str').str.zfill(2) + ' ' +
-        df['clk_h'].astype('int').astype('str').str.zfill(2) + ':' +
-        df['clk_m'].astype('int').astype('str').str.zfill(2) + ':' +
-        df['clk_s'].astype('int').astype('str').str.zfill(2) + '.' +
-        microseconds_series.astype('str').str.zfill(6)
-    )
-    
-    # Parse all datetime strings at once
-    df['TIMESTAMP'] = pd.to_datetime(datetime_strings, format='%Y-%m-%d %H:%M:%S.%f')
-    
-    return df
 
-
-def parse_GPSnc1(df, use_ct=False):
+def parse_GPSnc1(df):
     """
     Parse GPSnc1 format dataframe and add LAT, LON, TIMESTAMP columns.
     
@@ -302,8 +362,6 @@ def parse_GPSnc1(df, use_ct=False):
     -----------
     df : pandas.DataFrame
         DataFrame from load_xds_stream_file with GPSnc1 data
-    use_ct : bool
-        If True, attempt to use CT time headers for TIMESTAMP
         
     Returns:
     --------
@@ -323,32 +381,14 @@ def parse_GPSnc1(df, use_ct=False):
     else:
         raise ValueError("Column 'lon_ang' not found in GPSnc1 data")
 
-    ni_epoch = pd.to_datetime('1904-01-01 00:00:00')  # NI epoch start date
-    # See https://www.ni.com/en/support/documentation/supplemental/08/labview-timestamp-overview.html
-
     seconds_since_epoch = pd.to_timedelta(df['gps_time'].astype('int64') + df['gps_subsecs'].astype('uint64') / (2**64), unit='s')
-    gps_time = pd.to_datetime(ni_epoch) + seconds_since_epoch
-    df['GPS_TIME'] = (gps_time - pd.Timestamp("1980-01-06 00:00:00")) / pd.Timedelta('1s')
-
-    
-    # Try CT time first if requested
-    if use_ct:
-        df_with_ct = parse_CT(df)
-        if df_with_ct is not None:
-            # CT parsing successful, use it
-            df = df_with_ct
-        else:
-            # CT parsing failed, fall back to GPS time
-            use_ct = False
-    
-    # Create TIMESTAMP from GPS time if not using CT
-    if not use_ct:
-        df['TIMESTAMP'] = gps_time
+    gps_time = NI_EPOCH + seconds_since_epoch # Seconds since NI epoch
+    df['GPS_TIME'] = (gps_time - UNIX_EPOCH) / pd.Timedelta('1s') # For consistency with OPR, GPS_TIME is seconds since Unix epoch
         
     return df
 
 
-def parse_GPStp2(df, use_ct=False):
+def parse_GPStp2(df):
     """
     Parse GPStp2 format dataframe and add LAT, LON, TIMESTAMP columns.
     
@@ -382,57 +422,52 @@ def parse_GPStp2(df, use_ct=False):
     else:
         raise ValueError("Column 'longitude' not found in GPStp2 data")
     
-    # Handle TIMESTAMP
-    if use_ct:
-        df_with_ct = parse_CT(df)
-        if df_with_ct is not None:
-            df = df_with_ct
-    
-    # If no CT timestamp or CT failed, try DOS time
-    if 'TIMESTAMP' not in df.columns and 'dos_time' in df.columns:
-        # Parse DOS time (hh:mm:ss.s format)
-        timestamps = []
-        for dos_time_str in df['dos_time']:
-            try:
-                if pd.notna(dos_time_str) and ':' in str(dos_time_str):
-                    time_parts = str(dos_time_str).strip().split(':')
-                    if len(time_parts) >= 3:
-                        hour = int(time_parts[0])
-                        minute = int(time_parts[1])
-                        sec_parts = time_parts[2].split('.')
-                        second = int(sec_parts[0])
-                        microsecond = int(float('0.' + sec_parts[1]) * 1e6) if len(sec_parts) > 1 else 0
-                        
-                        # If we have date from CT, use it; otherwise use today as placeholder
-                        if 'clk_y' in df.columns and 'clk_n' in df.columns:
-                            # Use the date from CT columns
-                            year = int(df.loc[df.index[0], 'clk_y'])
-                            day_of_year = int(df.loc[df.index[0], 'clk_n'])
-                            base_date = datetime(year, 1, 1) + timedelta(days=day_of_year - 1)
-                        else:
-                            # Use a placeholder date - user will need to provide actual date
-                            base_date = datetime.now().date()
-                        
+    # Parse DOS time (hh:mm:ss.s format)
+    timestamps = []
+    for dos_time_str in df['dos_time']:
+        try:
+            if pd.notna(dos_time_str) and ':' in str(dos_time_str):
+                time_parts = str(dos_time_str).strip().split(':')
+                if len(time_parts) >= 3:
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1])
+                    sec_parts = time_parts[2].split('.')
+                    second = int(sec_parts[0])
+                    microsecond = int(float('0.' + sec_parts[1]) * 1e6) if len(sec_parts) > 1 else 0
+                    
+                    # If we have date from CT, use it
+                    if 'clk_y' in df.columns and 'clk_n' in df.columns and 'clk_d' in df.columns:
+                        # Use the date from CT columns (clk_n is month, clk_d is day)
+                        year = int(df.loc[df.index[0], 'clk_y'])
+                        month = int(df.loc[df.index[0], 'clk_n'])
+                        day = int(df.loc[df.index[0], 'clk_d'])
+                        base_date = datetime(year, month, day).date()
+
                         dt = datetime.combine(base_date, datetime.min.time()).replace(
                             hour=hour, minute=minute, second=second, microsecond=microsecond
                         )
                         timestamps.append(dt)
                     else:
+                        # Cannot create timestamp without date information
                         timestamps.append(pd.NaT)
                 else:
                     timestamps.append(pd.NaT)
-            except (ValueError, IndexError):
+            else:
                 timestamps.append(pd.NaT)
-        
-        df['TIMESTAMP'] = pd.to_datetime(timestamps)
-        
-        if 'clk_y' not in df.columns:
-            print("Warning: DOS time converted without date information. Timestamps use placeholder date.")
+        except (ValueError, IndexError):
+            timestamps.append(pd.NaT)
+
+    # Only create GPS_TIME columns if we have date information
+    if 'clk_y' in df.columns and 'clk_n' in df.columns and 'clk_d' in df.columns:
+        df['GPS_TIME_DT'] = pd.to_datetime(timestamps)
+        df['GPS_TIME'] = (df['GPS_TIME_DT'] - UNIX_EPOCH) / pd.Timedelta('1s')
+    else:
+        print("Warning: Cannot create GPS_TIME without date information from CT columns (clk_y, clk_n, clk_d).")
     
     return df
 
 
-def parse_GPSap3(df, use_ct=False):
+def parse_GPSap3(df):
     """
     Parse GPSap3 format dataframe and add LAT, LON, TIMESTAMP columns.
     
@@ -476,63 +511,58 @@ def parse_GPSap3(df, use_ct=False):
     else:
         raise ValueError("Columns 'ecefx', 'ecefy', and/or 'ecefz' not found in GPSap3 data")
     
-    # Handle TIMESTAMP
-    if use_ct:
-        df_with_ct = parse_CT(df)
-        if df_with_ct is not None:
-            df = df_with_ct
     
-    # If no CT timestamp or CT failed, use GPS time
-    if 'TIMESTAMP' not in df.columns and 'rtime' in df.columns:
-        # GPS time is in milliseconds of GPS week
-        # GPS epoch starts at January 6, 1980 00:00:00 UTC
-        # GPS weeks start on Sunday
-        
-        # Note: We need to know which GPS week we're in to get absolute time
-        # Without that info, we can only get time within the week
-        # For now, we'll need to use CT time or warn the user
-        
-        if 'clk_y' in df.columns and 'clk_n' in df.columns and 'clk_d' in df.columns:
-            # We have date info from CT, use it to determine GPS week
-            timestamps = []
-            for idx, row in df.iterrows():
-                try:
-                    # Get the date from CT columns
-                    year = int(row['clk_y'])
-                    month = int(row['clk_n'])
-                    day = int(row['clk_d'])
-                    
-                    # Calculate GPS week from this date
-                    gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
-                    current_date = datetime(year, month, day)
-                    days_since_epoch = (current_date - gps_epoch).days
-                    gps_week = days_since_epoch // 7
-                    
-                    # Calculate timestamp from GPS week and milliseconds
-                    ms_in_week = int(row['rtime'])
-                    total_ms_since_epoch = gps_week * 7 * 24 * 60 * 60 * 1000 + ms_in_week
-                    
-                    # Convert to datetime
-                    dt = gps_epoch + timedelta(milliseconds=total_ms_since_epoch)
-                    timestamps.append(dt)
-                except (ValueError, TypeError):
-                    timestamps.append(pd.NaT)
-            
-            df['TIMESTAMP'] = pd.to_datetime(timestamps)
-        else:
-            print("Warning: GPSap3 GPS time requires GPS week number or CT date info for absolute timestamps.")
-            print("Using relative time within GPS week starting from Sunday 00:00:00.")
-            
-            # Convert milliseconds to time within the week
-            ms_in_week = df['rtime'].astype('int64')
-            # Assume current GPS week starts at a recent Sunday
-            # This is a placeholder - user should provide actual GPS week or date
-            week_start = datetime.now()
-            week_start = week_start - timedelta(days=week_start.weekday() + 1)  # Previous Sunday
-            week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-            
-            df['TIMESTAMP'] = pd.to_datetime(week_start) + pd.to_timedelta(ms_in_week, unit='ms')
+    # GPS time is in milliseconds of GPS week
+    # GPS epoch starts at January 6, 1980 00:00:00 UTC
+    # GPS weeks start on Sunday
     
+    # Note: We need to know which GPS week we're in to get absolute time
+    # Without that info, we can only get time within the week
+    # For now, we'll need to use CT time or warn the user
+    
+    if 'clk_y' in df.columns and 'clk_n' in df.columns and 'clk_d' in df.columns:
+        # We have date info from CT, use it to determine GPS week
+        timestamps = []
+        for idx, row in df.iterrows():
+            try:
+                # Get the date from CT columns
+                year = int(row['clk_y'])
+                month = int(row['clk_n'])
+                day = int(row['clk_d'])
+                
+                # Calculate GPS week from this date
+                GPS_EPOCH = datetime(1980, 1, 6, 0, 0, 0)
+                current_date = datetime(year, month, day)
+                days_since_epoch = (current_date - GPS_EPOCH).days
+                gps_week = days_since_epoch // 7
+                
+                # Calculate timestamp from GPS week and milliseconds
+                ms_in_week = int(row['rtime'])
+                total_ms_since_epoch = gps_week * 7 * 24 * 60 * 60 * 1000 + ms_in_week
+                
+                # Convert to datetime
+                dt = GPS_EPOCH + timedelta(milliseconds=total_ms_since_epoch)
+                timestamps.append(dt)
+            except (ValueError, TypeError):
+                timestamps.append(pd.NaT)
+        
+        df['GPS_TIME_DT'] = pd.to_datetime(timestamps)
+    else:
+        print("Warning: GPSap3 GPS time requires GPS week number or CT date info for absolute timestamps.")
+        print("Using relative time within GPS week starting from Sunday 00:00:00.")
+        
+        # Convert milliseconds to time within the week
+        ms_in_week = df['rtime'].astype('int64')
+        # Assume current GPS week starts at a recent Sunday
+        # This is a placeholder - user should provide actual GPS week or date
+        week_start = datetime.now()
+        week_start = week_start - timedelta(days=week_start.weekday() + 1)  # Previous Sunday
+        week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        df['GPS_TIME_DT'] = pd.to_datetime(week_start) + pd.to_timedelta(ms_in_week, unit='ms')
+
+    df['GPS_TIME'] = (df['GPS_TIME_DT'] - UNIX_EPOCH) / pd.Timedelta('1s') # For consistency with OPR, GPS_TIME is seconds since Unix epoch
+
     return df
 
 
@@ -648,8 +678,8 @@ def parse_binary_AVNnp1(file_path):
                 continue
 
             # Calculate GPS timestamp
-            gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
-            gps_time = (pd.Timedelta(weeks=gps_week) + pd.Timedelta(seconds=seconds_into_week))/pd.Timedelta('1s')
+            gps_time_from_GPS_EPOCH = (pd.Timedelta(weeks=gps_week) + pd.Timedelta(seconds=seconds_into_week))/pd.Timedelta('1s')
+            gps_time = (GPS_EPOCH + pd.Timedelta(seconds=gps_time_from_GPS_EPOCH) - UNIX_EPOCH) / pd.Timedelta('1s') # For consistency with OPR, GPS_TIME is seconds since Unix epoch
 
             # Store record
             records.append({
@@ -705,9 +735,9 @@ def parse_binary_AVNnp1(file_path):
     return df
 
 
-def parse_GPSp1(df, use_ct=False):
+def parse_GPSap1(df):
     """
-    Parse GPSap1 format dataframe and add LAT, LON, TIMESTAMP columns.
+    Parse GPSap1 format dataframe and add LAT, LON, GPS_TIME columns.
     
     GPSap1 is from Ashtech M12 GPS Navigation System with:
     - Latitude in degrees and minutes with hemisphere
@@ -718,13 +748,11 @@ def parse_GPSp1(df, use_ct=False):
     -----------
     df : pandas.DataFrame
         DataFrame from load_xds_stream_file with GPSap1 data
-    use_ct : bool
-        If True, attempt to use CT time headers for TIMESTAMP
         
     Returns:
     --------
     pandas.DataFrame
-        DataFrame with added LAT, LON, TIMESTAMP columns
+        DataFrame with added LAT, LON, GPS_TIME columns
     """
     df = df.copy()
     
@@ -758,46 +786,97 @@ def parse_GPSp1(df, use_ct=False):
     else:
         raise ValueError("Columns 'lon_d', 'lon_m', and/or 'lnh' not found in GPSap1 data")
     
-    # Handle TIMESTAMP
-    if use_ct:
-        df_with_ct = parse_CT(df)
-        if df_with_ct is not None:
-            df = df_with_ct
-    
-    # If no CT timestamp or CT failed, try UTC time
-    if 'TIMESTAMP' not in df.columns and all(col in df.columns for col in ['utc_h', 'utc_m', 'utc_s']):
-        # Parse UTC time components
-        timestamps = []
-        for idx, row in df.iterrows():
-            try:
-                hour = int(row['utc_h'])
-                minute = int(row['utc_m'])
-                second_float = float(row['utc_s'])
-                second = int(second_float)
-                microsecond = int((second_float % 1) * 1e6)
-                
-                # If we have date from CT, use it; otherwise use today as placeholder
-                if 'clk_y' in df.columns and 'clk_n' in df.columns:
-                    # Use the date from CT columns
-                    year = int(row['clk_y'])
-                    day_of_year = int(row['clk_n'])
-                    base_date = datetime(year, 1, 1) + timedelta(days=day_of_year - 1)
-                else:
-                    # Use a placeholder date - user will need to provide actual date
-                    base_date = datetime.now().date()
-                
+    # Parse UTC time components
+    timestamps = []
+    for idx, row in df.iterrows():
+        try:
+            hour = int(row['utc_h'])
+            minute = int(row['utc_m'])
+            second_float = float(row['utc_s'])
+            second = int(second_float)
+            microsecond = int((second_float % 1) * 1e6)
+            
+            # If we have date from CT, use it
+            if 'clk_y' in df.columns and 'clk_n' in df.columns and 'clk_d' in df.columns:
+                # Use the date from CT columns (clk_n is month, clk_d is day)
+                year = int(row['clk_y'])
+                month = int(row['clk_n'])
+                day = int(row['clk_d'])
+                base_date = datetime(year, month, day).date()
+
                 dt = datetime.combine(base_date, datetime.min.time()).replace(
                     hour=hour, minute=minute, second=second, microsecond=microsecond
                 )
                 timestamps.append(dt)
-            except (ValueError, TypeError):
+            else:
+                # Cannot create timestamp without date information
                 timestamps.append(pd.NaT)
-        
-        df['TIMESTAMP'] = pd.to_datetime(timestamps)
-        
-        if 'clk_y' not in df.columns:
-            print("Warning: UTC time converted without date information. Timestamps use placeholder date.")
+        except (ValueError, TypeError):
+            timestamps.append(pd.NaT)
+
+    # Only create GPS_TIME columns if we have date information
+    if 'clk_y' in df.columns and 'clk_n' in df.columns and 'clk_d' in df.columns:
+        df['GPS_TIME_DT'] = pd.to_datetime(timestamps)
+        df['GPS_TIME'] = (df['GPS_TIME_DT'] - UNIX_EPOCH) / pd.Timedelta('1s')
+    else:
+        print("Warning: Cannot create GPS_TIME without date information from CT columns (clk_y, clk_n, clk_d).")
     
+    return df
+
+
+def parse_GPSkc1(df):
+    """
+    Parse GPSkc1 format dataframe and add GPS_TIME columns.
+
+    GPSkc1 is from Kinemetrics TrueTime 705-101 GPS Time Code Generator with:
+    - gps_clk: GPS time in jjj:hh:mm:ss format (Julian day:hours:minutes:seconds)
+    - gps_tqc: Time quality character (SP, ., *, #, ?)
+
+    Parameters:
+    -----------
+    df : pandas.DataFrame
+        DataFrame from load_xds_stream_file with GPSkc1 data
+
+    Returns:
+    --------
+    pandas.DataFrame
+        DataFrame with added GPS_TIME and GPS_TIME_DT columns
+    """
+    df = df.copy()
+
+    if 'gps_clk' not in df.columns:
+        raise ValueError("Column 'gps_clk' not found in GPSkc1 data")
+
+    # Parse gps_clk field (jjj:hh:mm:ss format) using vectorized string operations
+    # Split the clock string into components
+    clk_parts = df['gps_clk'].astype(str).str.split(':', expand=True)
+
+    # Extract each component as integers
+    day_of_year = pd.to_numeric(clk_parts[0], errors='coerce')
+    hour = pd.to_numeric(clk_parts[1], errors='coerce')
+    minute = pd.to_numeric(clk_parts[2], errors='coerce')
+    second = pd.to_numeric(clk_parts[3], errors='coerce')
+
+    # Calculate timedelta from start of year in seconds (vectorized)
+    timedelta_seconds = (
+        (day_of_year - 1) * 24 * 60 * 60 +
+        hour * 60 * 60 +
+        minute * 60 +
+        second
+    )
+
+    # Check if clk_y field exists (calendar year from CT file)
+    if 'clk_y' in df.columns:
+        # Create datetime strings for each year start
+        year_start_strings = df['clk_y'].astype('int').astype('str') + '-01-01'
+        year_starts = pd.to_datetime(year_start_strings, format='%Y-%m-%d')
+
+        # Add timedelta to year start (vectorized)
+        df['GPS_TIME_DT'] = year_starts + pd.to_timedelta(timedelta_seconds, unit='s')
+        df['GPS_TIME'] = (df['GPS_TIME_DT'] - UNIX_EPOCH) / pd.Timedelta('1s')
+    else:
+        print("Warning: 'clk_y' field not found. Cannot create GPS_TIME without calendar year information.")
+
     return df
 
 
