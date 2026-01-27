@@ -1,3 +1,7 @@
+old/
+outputs/*
+!outputs/maps/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
