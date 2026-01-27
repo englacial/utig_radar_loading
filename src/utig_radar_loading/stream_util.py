@@ -173,8 +173,12 @@ def load_ct_file(file_path : str, read_csv_kwargs = {}, parse=True):
     ct_file.close()
 
     if parse:
-        df = parse_CT(df) # Parse date/time and add COMP_TIME column
-        df['RADAR_TIME'] = df['tim'] # Add RADAR_TIME column for consistency with stream files
+        try:
+            df = parse_CT(df) # Parse date/time and add COMP_TIME column
+            df['RADAR_TIME'] = df['tim'] # Add RADAR_TIME column for consistency with stream files
+        except ValueError as e:
+            print(f"Error parsing CT file at {file_path}: {e}")
+            raise e
 
     return df
 
@@ -223,6 +227,14 @@ def parse_CT(df):
     # This is much faster than creating datetime objects individually
     # Convert microseconds to Series for string operations
     microseconds_series = pd.Series(microseconds, index=df.index)
+
+    if np.any(df['clk_n'] == 0):
+        print("Note: Adding 1 to clk_n (month)")
+        df['clk_n'] += 1 # TODO: I suspect that the month was zero-indexed in early data
+
+    if np.any(df['clk_n'] < 1) or np.any(df['clk_n'] > 12):
+        raise ValueError(f"Invalid month value in CT data. Found clk_n values: {df['clk_n'].unique()} and clk_y values: {df['clk_y'].unique()}")
+
     
     datetime_strings = (
         df['clk_y'].astype('int').astype('str') + '-' +
@@ -848,6 +860,8 @@ def parse_GPSkc1(df):
         raise ValueError("Column 'gps_clk' not found in GPSkc1 data")
 
     # Parse gps_clk field (jjj:hh:mm:ss format) using vectorized string operations
+    # Strip any leading or trailing whitespace or underscores
+    df['gps_clk'] = df['gps_clk'].astype(str).str.strip().str.replace('_', '')
     # Split the clock string into components
     clk_parts = df['gps_clk'].astype(str).str.split(':', expand=True)
 

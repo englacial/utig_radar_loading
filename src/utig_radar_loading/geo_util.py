@@ -5,27 +5,34 @@ import pandas as pd
 import holoviews as hv
 from utig_radar_loading import stream_util, opr_gps_file_generation
 
-def load_gps_data(transects_df, source_type='field'):
+def load_gps_data(transects_df, source_type=None):
     segment_dfs = []
 
     for idx, row in transects_df.iterrows():
 
-        if source_type == 'field':
+        if source_type is None:
+            if pd.notna(row['postprocessed_gps_path']):
+                tmp_source_type = 'postprocessed'
+            else:
+                tmp_source_type = 'field'
+        else:
+            tmp_source_type = source_type
+
+        if tmp_source_type == 'field':
             f = row['gps_path']
             
             df = stream_util.load_xds_stream_file(f, parse=True)
-        elif source_type == 'postprocessed':
+        elif tmp_source_type == 'postprocessed':
             f = row['postprocessed_gps_path']
             df = opr_gps_file_generation.load_and_parse_postprocessed_gps_file(f)
             df['prj'] = idx[0]
             df['set'] = idx[1]
             df['trn'] = idx[2]
         else:
-            raise ValueError(f"Unknown source_type {source_type}")
+            raise ValueError(f"Unknown source_type {tmp_source_type}")
 
-        line_length_km = stream_util.calculate_track_distance_km(df)
-
-        _, _, line_length_m_shapely = project_split_and_simplify(df['LON'].values, df['LAT'].values, calc_length=True, simplify_tolerance=100)
+        #line_length_km = stream_util.calculate_track_distance_km(df)
+        #_, _, line_length_m_shapely = project_split_and_simplify(df['LON'].values, df['LAT'].values, calc_length=True, simplify_tolerance=100)
 
         necessary_keys = ['prj', 'set', 'trn', 'clk_y', 'LAT', 'LON', 'TIMESTAMP']
         for k in necessary_keys:
@@ -114,19 +121,17 @@ def create_path(segment_dfs, path_opts_kwargs={}):
             'y': y_proj
         })
 
-        required_fields = ['prj', 'set', 'trn', 'clk_y']
-        display_fields = ['prj', 'set', 'trn', 'clk_y']
-        if 'radar_stream_type' in df_tmp:
-            required_fields.append('radar_stream_type')
-            display_fields.append('radar')
+        required_fields = ['prj', 'set', 'trn']
+        optional_fields = ['segment_path', 'radar_stream_type']
+        display_fields = required_fields.copy()
+        for k in optional_fields:
+            if k in df_tmp:
+                display_fields.append(k)
 
-        for k in required_fields:
+        for k in display_fields:
             df_simplified[k] = df_tmp[k].iloc[0]
             if len(df_tmp[k].unique()) > 1:
                 print(f"segment_dfs[{idx}]['{k}'].unique(): {df_tmp[k].unique()}")
-
-        if 'radar_stream_type' in df_tmp:
-            df_simplified['radar'] = df_simplified['radar_stream_type']
 
         dfs.append(df_simplified)
 

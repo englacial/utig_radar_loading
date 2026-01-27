@@ -1,7 +1,7 @@
 [project]
 name = "utig_radar_loading"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "astropy>=7.1.0",
     "cartopy>=0.25.0",
@@ -31,3 +31,7 @@ members = [
 
 [tool.uv.sources]
 utig-unfoc = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"

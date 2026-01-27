@@ -108,6 +108,11 @@ def arrange_by_transect(df_artifacts, streams):
             matching_entry = group[(group['stream'].isin(streams[data_category]['stream_types'])) & \
                 (group['file_name'].isin(streams[data_category]['file_names']))]
             if not matching_entry.empty:
+                # Sort matching_entry by preferred stream type order
+                preferred_order = {stype: i for i, stype in enumerate(streams[data_category]['stream_types'])}
+                matching_entry['preferred_order'] = matching_entry['stream'].map(preferred_order)
+                matching_entry = matching_entry.sort_values('preferred_order')
+
                 df[f"{data_category}_stream_type"] = matching_entry['stream'].values[0]
                 df[f"{data_category}_path"] = matching_entry['full_path'].values[0]
 
@@ -132,10 +137,9 @@ def get_start_timestamp(transect):
     if isinstance(fp, float) and np.isnan(fp):
         return None
 
-    ct_df = stream_util.load_ct_file(fp, read_csv_kwargs={'nrows': 1})
-    ct_df = stream_util.parse_CT(ct_df)
+    ct_df = stream_util.load_ct_file(fp, read_csv_kwargs={'nrows': 1}, parse=True)
 
-    return ct_df.iloc[0]['TIMESTAMP']
+    return ct_df.iloc[0]['COMP_TIME_DT']
 
 def get_end_timestamp(transect):
     fp = transect['gps_path']
@@ -152,7 +156,7 @@ def get_end_timestamp(transect):
     ct_columns = ['prj', 'set', 'trn', 'seq', 'clk_y', 'clk_n', 'clk_d', 'clk_h', 'clk_m', 'clk_s', 'clk_f', 'tim']
     ct_df = pd.read_csv(StringIO(last_line), sep=r'\s+', names=ct_columns, index_col=False)
     ct_df = stream_util.parse_CT(ct_df)
-    return ct_df.iloc[0]['TIMESTAMP']
+    return ct_df.iloc[0]['COMP_TIME']
 
 def season_from_datetime(d):
     if d.month >= 6:
@@ -167,3 +171,39 @@ def assign_seasons(df_transects):
     df_all_seasons['season'] = df_all_seasons['season'].astype('Int32')
     df_all_seasons = df_all_seasons.sort_values('prj')
     return df_all_seasons
+
+def add_postprocessed_gps_paths(df_season, season_gps_postprocessed_dir, ignore_set : bool = False):
+    # Add post-processed GPS paths if available
+    # Files should be named as EPUTG1B_XXXX_PRJ_SET_TRN_position.txt
+
+    df_season = df_season.copy()
+    df_season['postprocessed_gps_path'] = np.nan
+    df_season['postprocessed_gps_type'] = np.nan
+
+    gps_files = glob.glob(f"{season_gps_postprocessed_dir}/*PUTG1B_*_position.txt")
+    for f in gps_files:
+        parts = Path(f).stem.split('_')
+        if len(parts) < 6:
+            continue
+        prj = parts[-4]
+        set_ = parts[-3]
+        trn = parts[-2]
+        key = (prj, set_, trn)
+
+        if ignore_set:
+            matching_keys = [k for k in df_season.index if k[0] == prj and k[2] == trn]
+            if len(matching_keys) == 0:
+                continue
+            elif len(matching_keys) > 1:
+                print(f"Warning: Multiple matching keys found for prj={prj}, trn={trn} when ignoring set")
+                for mk in matching_keys:
+                    df_season.loc[mk, 'postprocessed_gps_path'] = f
+                    df_season.loc[mk, 'postprocessed_gps_type'] = 'EPUTG1B'
+                continue
+            else:
+                key = matching_keys[0]
+
+        df_season.loc[key, 'postprocessed_gps_path'] = f
+        df_season.loc[key, 'postprocessed_gps_type'] = 'EPUTG1B'
+
+    return df_season

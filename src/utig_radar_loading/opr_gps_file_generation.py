@@ -31,7 +31,7 @@ def load_and_parse_gps_file(gps_path: Union[str, Path]) -> pd.DataFrame:
     Returns:
     --------
     pd.DataFrame
-        DataFrame with parsed GPS data including LAT, LON, TIMESTAMP
+        DataFrame with parsed GPS data including GPS_TIME, RADAR_TIME
     """
     gps_path = Path(gps_path)
     
@@ -43,9 +43,9 @@ def load_and_parse_gps_file(gps_path: Union[str, Path]) -> pd.DataFrame:
         return pd.DataFrame()
     
     # Ensure we have the required columns
-    required_cols = ['LAT', 'LON', 'GPS_TIME', 'RADAR_TIME']
+    required_cols = ['GPS_TIME', 'RADAR_TIME']
     if not all(col in df.columns for col in required_cols):
-        warnings.warn(f"Missing required columns in {gps_path}")
+        warnings.warn(f"Missing required columns in {gps_path}. Required columns: {required_cols}, found columns: {df.columns.tolist()}")
         return pd.DataFrame()
 
     return df
@@ -123,7 +123,7 @@ def load_and_parse_postprocessed_gps_file(gps_path: Union[str, Path]) -> pd.Data
     # Read first line to check for "EPUTG1B" format
     with open(gps_path, 'r') as f:
         first_line = f.readline().strip()
-    if not ("EPUTG1B" in first_line or "SPUTG1B" in first_line):
+    if not (("EPUTG1B" in first_line) or ("SPUTG1B" in first_line) or ("IPUTG1B" in first_line)):
         warnings.warn(f"File {gps_path} does not appear to be in expected post-processed GPS format (missing 'EPUTG1B' or 'SPUTG1B' in first line)")
         return pd.DataFrame()
 
@@ -320,7 +320,7 @@ def generate_gps_file(gps_paths: List[Union[str, Path]],
             time_sort_key='GPS_TIME'
         )
         print(f"Merged {len(postproc_df)} post-processed GPS records from {postprocessed_gps_paths}")
-    
+
     # Load and merge GPS files
     field_gps_df = merge_position_files(
         file_paths=gps_paths,
@@ -362,9 +362,8 @@ def generate_gps_file(gps_paths: List[Union[str, Path]],
         if field_imu_df is not None and not field_imu_df.empty:
             merged_df = merge_df(merged_df, field_imu_df, interp_x_key='GPS_TIME', interp_y_keys=['HEADING', 'PITCH', 'ROLL'], other_keys_suffix = "_field_imu")
     
-    print(f"Merged dataframe columns: {merged_df.columns.tolist()} (len: {len(merged_df)}) (source: {source})")
-
     merged_df = merged_df.dropna(subset=['GPS_TIME', 'COMP_TIME', 'RADAR_TIME', 'LAT', 'LON'])
+    print(f"Merged dataframe columns: {merged_df.columns.tolist()} (len: {len(merged_df)}) (source: {source})")
     
     # Add extrapolated values to cover small time gaps between GPS and radar
     if gps_pad_time_s and gps_pad_time_s > 0:
