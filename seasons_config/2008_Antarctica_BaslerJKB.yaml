@@ -1,0 +1,126 @@
+
+
+# Defaults for generating parameter spreadsheet tabs
+params:
+  # Default parameters for 2008_Antarctica_BaslerJKB
+  # Based on default_radar_params_2022_Antarctica_BaslerMKB_rds.m
+  
+  cmd:
+    frms: ~
+    records: 1
+    qlook: 1
+    sar: ~
+    array: ~
+    generic: ~
+    mission_names: ""
+    notes: ""
+
+  records:
+    file.version: 425
+    file.endian: "little"
+    file.boards: "{'bxds1', 'bxds2'}" # Just needs to be a 2 element cell array -- not actually using the %b replacements
+    file.start_idx: 1
+    file.stop_idx: 1
+    file.start_record: ~
+    file.stop_record: ~
+    file.base_dir: "/kucresis/scratch/data/UTIG/UTIG1/orig/xlob/"
+    file.board_folder_name: ~ # Will be replaced by paths
+    file.prefix: "{'bxds1', 'bxds2'}"
+    file.clk: 1e7
+    frames.geotiff_fn: "antarctica/Landsat-7/Antarctica_LIMA.tif"
+    frames.mode: 1
+    gps.time_offset: 0
+    gps.en: 1
+    gps.fn: ~ # Will be replaced by paths
+
+  qlook:
+    out_path: ~
+    img_comb: "[8e-06 -Inf 1e-06]"
+    imgs: "{[1 1],[1 2]}"
+    block_size: 20000
+    motion_comp: 0
+    dec: 10
+    inc_dec: 5
+    surf.en: 1
+    surf.profile: "RDS_OIB"
+    resample: "[2 1]"
+    radiometric_corr_dB: ~
+
+  sar:
+    out_path: ~
+    imgs: "{[1 1],[1 2]}"
+    chunk_len: 5000
+    mocomp.en: 1
+    sigma_x: 2.5
+
+  array:
+    in_path: ~
+    out_path: ~
+    img_comb: "[8e-06 -Inf 1e-06]" # TODO
+    imgs: "{[1 1],[1 2]}"
+    method: "standard"
+    bin_rng: 0
+    line_rng: "[-10:10]"
+    dline: 11
+    ft_over_sample: ~
+    radiometric_corr_dB: ~
+
+  radar:
+    fs: 50000000
+    prf: 6250
+    adc_bits: 14
+    Vpp_scale: 2
+    lever_arm_fh: "@lever_arm"
+    size: 1
+    deconv.en: ~
+    adcs: "[1 2]"
+    f0: 52500000
+    f1: 67500000
+    DDC_dec: 1
+    DDC_freq: 0
+    tukey: 0.1
+    BW_window: "[52000000 68000000]"
+    ft_wind: "@(N)tukeywin(N,0.2)"
+    ft_dec: "[1 1]"
+    Tpd: 1e-6
+    tx_weights: "[1 0]"
+    system_dB: 0
+    rx_paths: "[1 2]"
+    adc_gains_dB: "[4 50]" # TODO
+    chan_equal_dB: "[0.7 2.2]" # TODO
+    chan_equal_deg: "[111 -172.9]" # TODO
+    Tsys: "[-9.4526 24.29497]*1e-9" # TODO
+    presums: 32
+    bit_shifts: "[0 0]"
+    Tadc_adjust: -1.26e-6 # TODO
+    Tadc: 0
+    gain_en: "[0 0]"
+    coh_noise_method: "'analysis'"
+
+  post:
+    out_path: ~
+    data_dirs: "{'standard'}"
+    img: 0
+    layer_dir: "layer"
+    maps_en: 1
+    echo_en: 1
+    layers: "[struct('name', 'surface', 'source', 'layerdata')]"
+    layers_en: 1
+    data_en: ~
+    csv_en: 1
+    concat_en: 1
+    pdf_en: 1
+    map.location: "Antarctica"
+    map.type: "combined"
+    echo.elev_comp: 3
+    echo.depth: "[publish_echogram_switch(Bbad,0.25,Surface_Elev,-3500,DBottom,-100),max(Surface_Elev+100)]"
+    echo.er_ice: 3.15
+    ops.location: "antarctica"
+
+  analysis_noise:
+    block_size: 10000
+    imgs: "{[1 1],[1 2]}"
+    size: 1
+    method: "coh_noise"
+    distance_weight: 1
+    block_ave: 1000
